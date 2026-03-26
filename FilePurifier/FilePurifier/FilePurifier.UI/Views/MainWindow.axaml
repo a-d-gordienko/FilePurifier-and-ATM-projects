@@ -1,0 +1,70 @@
+﻿<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:FilePurifier.UI.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="600" d:DesignHeight="500"
+        x:Class="FilePurifier.UI.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="Text Refiner - Очистка файлов"
+        Width="700" Height="500"
+        WindowStartupLocation="CenterScreen">
+
+    <Grid RowDefinitions="Auto, *, Auto" Margin="20">
+        
+        <!-- Блок настроек (Сверху) -->
+        <Border Grid.Row="0" Background="#f4f4f4" CornerRadius="8" Padding="15" Margin="0,0,0,15">
+            <StackPanel Spacing="10">
+                <TextBlock Text="Настройки обработки" FontWeight="Bold" FontSize="16" Margin="0,0,0,5"/>
+                
+                <CheckBox Content="Удалять слова короче заданной длины" 
+                          IsChecked="{Binding RemoveWords}"/>
+                
+                <StackPanel Orientation="Horizontal" Spacing="10" IsEnabled="{Binding RemoveWords}">
+                    <TextBlock Text="Минимальное количество символов:" VerticalAlignment="Center"/>
+                    <NumericUpDown Value="{Binding MinWordLength}" Minimum="2" Maximum="100" Width="130" ClipValueToMinMax="True"/>
+                </StackPanel>
+
+                <CheckBox Content="Удалить все знаки препинания" 
+                          IsChecked="{Binding RemovePunctuation}"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Список выбранных файлов (Центр) -->
+        <Grid Grid.Row="1" RowDefinitions="Auto, *">
+            <TextBlock Grid.Row="0" Text="Список файлов в очереди:" Margin="0,0,0,5" FontWeight="SemiBold"/>
+            <ListBox Grid.Row="1" ItemsSource="{Binding SelectedFiles}" BorderThickness="1" BorderBrush="#DDDDDD">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid ColumnDefinitions="*, Auto">
+                            <StackPanel Orientation="Vertical">
+                                <TextBlock Text="{Binding Name}" FontWeight="Medium"/>
+                                <TextBlock Text="{Binding Path}" FontSize="10" Foreground="Gray"/>
+                            </StackPanel>
+                            <Border Grid.Column="1" Padding="8,4" CornerRadius="4" 
+                                    Background="{Binding Status, Converter={x:Null}}"> <!-- Здесь можно добавить конвертер цвета -->
+                                <TextBlock Text="{Binding Status}" VerticalAlignment="Center" FontWeight="Bold"/>
+                            </Border>
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Grid>
+
+        <!-- Панель управления (Снизу) -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="12" Margin="0,20,0,0">
+            <ProgressBar IsVisible="{Binding IsProcessing}" IsIndeterminate="True" Width="150" VerticalAlignment="Center"/>
+            
+            <!-- Обратите внимание: кнопка выбора файлов привязана к методу в Code-Behind через Click -->
+            <Button Content="Выбрать файлы" 
+                    Click="OnSelectFilesClick"
+                    IsEnabled="{Binding !IsProcessing}"
+                    Padding="15,8"/>
+            
+            <Button Content="Начать обработку" 
+                    Command="{Binding StartCommand}"
+                    Background="DodgerBlue" Foreground="White"
+                    Padding="20,8" FontWeight="Bold"/>
+        </StackPanel>
+    </Grid>
+</Window>
