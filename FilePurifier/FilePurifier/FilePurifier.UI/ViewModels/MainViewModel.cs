@@ -12,55 +12,81 @@ namespace FilePurifier.UI.ViewModels;
 
 public partial class MainViewModel : ObservableObject
 {
-    // Параметры обработки
-    [ObservableProperty] private bool _removeWords = true;
-    [ObservableProperty] private int _minWordLength = 3;
-    [ObservableProperty] private bool _removePunctuation = true;
-    [ObservableProperty] private bool _isProcessing;
+    private readonly IFilePurifierService _filePurifierService;
 
-    [RelayCommand]
-    private async Task ClearFiles()
-    {
-        SelectedFiles.Clear();
-        StartCommand.NotifyCanExecuteChanged();
-        await Task.CompletedTask;
-    }
+    [ObservableProperty]
+    private bool _removeWords = true;
 
-    // Список выбранных файлов и их статусы
+    [ObservableProperty]
+    private int _minWordLength = 3;
+
+    [ObservableProperty]
+    private bool _removePunctuation = true;
+
+    [ObservableProperty]
+    private bool _isProcessing;
+
     public ObservableCollection<FileItemViewModel> SelectedFiles { get; } = new();
 
     public IAsyncRelayCommand SelectFilesCommand { get; }
     public IAsyncRelayCommand StartCommand { get; }
 
-    public MainViewModel()
+    [RelayCommand]
+    private void ClearFiles()
     {
+        SelectedFiles.Clear();
+        StartCommand.NotifyCanExecuteChanged();
+    }
+
+    public MainViewModel() : this(new FilePurifierService())
+    {
+    }
+
+    public MainViewModel(IFilePurifierService filePurifierService)
+    {
+        _filePurifierService = filePurifierService;
+
         SelectFilesCommand = new AsyncRelayCommand(OnSelectFiles);
-        StartCommand = new AsyncRelayCommand(OnStartProcessing, () => !IsProcessing && SelectedFiles.Count > 0);
+        StartCommand = new AsyncRelayCommand(
+            OnStartProcessing,
+            () => !IsProcessing && SelectedFiles.Count > 0);
     }
 
     private async Task OnSelectFiles()
     {
-        // Логика выбора файлов через StorageProvider (вызывается из View или через сервис)
-        // Для примера предположим, что пути передаются из View
     }
 
     private async Task OnStartProcessing()
     {
         IsProcessing = true;
-        var service = new FilePurifierService(RemoveWords, MinWordLength, RemovePunctuation);
+
+        var options = new TextCleanerOptions
+        {
+            RemoveShortWords = RemoveWords,
+            MinWordLength = MinWordLength,
+            RemovePunctuation = RemovePunctuation
+        };
 
         var paths = SelectedFiles.Select(f => f.Path).ToList();
 
-        // Используем IProgress для обновления статуса конкретных файлов
-        var progress = new Progress<string>(path =>
+        var progress = new Progress<FileProcessingStatus>(status =>
         {
-            var file = SelectedFiles.FirstOrDefault(f => f.Path == path);
-            if (file != null) file.Status = "Готово";
+            var file = SelectedFiles.FirstOrDefault(f => f.Path == status.FilePath);
+            if (file != null)
+            {
+                file.Status = status.Result switch
+                {
+                    FileProcessingResult.Success => "Готово",
+                    FileProcessingResult.Skipped => "Пропущено",
+                    FileProcessingResult.Failed => $"Ошибка: {status.ErrorMessage}",
+                    _ => file.Status
+                };
+            }
         });
 
         try
         {
-            await service.ProcessFilesAsync(paths, progress);
+            await _filePurifierService.ProcessFilesAsync(paths, options, progress);
         }
         finally
         {
@@ -68,10 +94,10 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-
     partial void OnMinWordLengthChanged(int value)
     {
-        if (value < 2) MinWordLength = 2;
+        if (value < 2)
+            MinWordLength = 2;
     }
 }
 
@@ -80,6 +106,6 @@ public partial class FileItemViewModel : ObservableObject
     public required string Path { get; init; }
     public string Name => System.IO.Path.GetFileName(Path);
 
-    [ObservableProperty] private string _status = "Ожидание";
+    [ObservableProperty]
+    private string _status = "Ожидание";
 }
-

@@ -1,43 +1,63 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
+﻿namespace FilePurifier.Core;
 
-namespace FilePurifier.Core
+public interface IFilePurifierService
 {
-    // Публичный интерфейс для UI проекта
-    public class FilePurifierService
+    Task ProcessFilesAsync(
+        IEnumerable<string> filePaths,
+        TextCleanerOptions options,
+        IProgress<FileProcessingStatus>? progress = null,
+        CancellationToken cancellationToken = default);
+}
+
+public record FileProcessingStatus(
+    string FilePath,
+    FileProcessingResult Result,
+    string? ErrorMessage = null);
+
+public enum FileProcessingResult
+{
+    Success,
+    Skipped,
+    Failed
+}
+
+public class FilePurifierService : IFilePurifierService
+{
+    public async Task ProcessFilesAsync(
+        IEnumerable<string> filePaths,
+        TextCleanerOptions options,
+        IProgress<FileProcessingStatus>? progress = null,
+        CancellationToken cancellationToken = default)
     {
-        private readonly bool _removeWords;
-        private readonly int _minWordLength;
-        private readonly bool _removePunctuation;
+        var tasks = filePaths.Select(path => ProcessSingleFileAsync(path, options, progress, cancellationToken));
+        await Task.WhenAll(tasks);
+    }
 
-        public FilePurifierService(bool removeWords, int minWordLength, bool removePunctuation)
+    private async Task ProcessSingleFileAsync(
+        string path,
+        TextCleanerOptions options,
+        IProgress<FileProcessingStatus>? progress,
+        CancellationToken cancellationToken)
+    {
+        try
         {
-            _removeWords = removeWords;
-            _minWordLength = minWordLength;
-            _removePunctuation = removePunctuation;
-        }
+            cancellationToken.ThrowIfCancellationRequested();
 
-        /// <summary>
-        /// Асинхронно обрабатывает список файлов один за другим.
-        /// </summary>
-        public async Task ProcessFilesAsync(IEnumerable<string> filePaths, IProgress<string>? progress = null)
-        {
-            // Ограничиваем параллелизм количеством ядер процессора (опционально)
-            var options = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
-
-            await Parallel.ForEachAsync(filePaths, options, async (path, token) =>
+            await Task.Run(() =>
             {
-                // Каждая итерация запускается в своем потоке из пула
-                await Task.Run(() =>
-                {
-                    var cleaner = new TextCleaner(_removeWords, _minWordLength, _removePunctuation);
-                    cleaner.Process(path);
-                }, token);
+                var service = new TextCleanerService(options);
+                service.ProcessFile(path);
+            }, cancellationToken);
 
-                // Уведомляем UI (Report безопасен для вызова из разных потоков)
-                progress?.Report(path);
-            });
+            progress?.Report(new FileProcessingStatus(path, FileProcessingResult.Success));
+        }
+        catch (OperationCanceledException)
+        {
+            progress?.Report(new FileProcessingStatus(path, FileProcessingResult.Skipped));
+        }
+        catch (Exception ex)
+        {
+            progress?.Report(new FileProcessingStatus(path, FileProcessingResult.Failed, ex.Message));
         }
     }
 }

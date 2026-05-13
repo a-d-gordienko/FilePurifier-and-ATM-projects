@@ -1,164 +1,198 @@
 ﻿using System.Buffers;
+using System.IO;
 using System.Text;
 
-namespace FilePurifier.Core
+namespace FilePurifier.Core;
+
+public class TextCleanerOrchestrator : ITextProcessor
 {
-    internal class TextCleaner
+    private readonly TextCleanerOptions _options;
+    private string _leftoverWord = string.Empty;
+
+    public TextCleanerOrchestrator(TextCleanerOptions options)
     {
-        private readonly bool _removeShortWords;
-        private readonly int _minWordLength;
-        private readonly bool _removePunctuation;
-        private FileProcessingContext? context_;
+        _options = options;
+    }
 
-        // Все, что обрывает слово
-        private static readonly SearchValues<char> AllDelimiters =
-            SearchValues.Create(" \t\n\r.,!?;:-()\"'[]{}<>\\/|@#$%^&*+_=`~");
+    public TextCleanerOptions Options => _options;
 
-        // Только те, которые мы считаем пунктуацией для удаления
-        private static readonly SearchValues<char> PunctuationOnly =
-            SearchValues.Create(".,!?;:-()\"'[]{}<>\\/|@#$%^&*+_=`~");
+    public TextProcessingResult ProcessBlock(
+        ReadOnlySpan<byte> buffer,
+        IFileWriter writer,
+        bool isLastBlock)
+    {
+        string text = Encoding.UTF8.GetString(buffer);
+        var span = text.AsSpan();
 
-        // Хранит часть слова, разорванного между блоками
-        private string _leftoverWord = string.Empty;
-
-        public TextCleaner(bool removeShortWords, int minWordLength, bool removePunctuation)
+        if (!string.IsNullOrEmpty(_leftoverWord))
         {
-            _removeShortWords = removeShortWords;
-            _minWordLength = minWordLength;
-            _removePunctuation = removePunctuation;           
+            span = string.Concat(_leftoverWord, text).AsSpan();
+            _leftoverWord = string.Empty;
         }
 
-        public void Process(string inputPath)
+        var output = new StringBuilder(span.Length);
+        var result = ProcessText(span, isLastBlock);
+
+        if (result.HasError)
+            return result;
+
+        _leftoverWord = result.LeftoverWord;
+        return result;
+    }
+
+    private TextProcessingResult ProcessText(ReadOnlySpan<char> span, bool isLastBlock)
+    {
+        return TextProcessingResult.Success();
+    }
+}
+
+public class TextCleanerService
+{
+    private readonly TextCleanerOptions _options;
+
+    public TextCleanerService(TextCleanerOptions options)
+    {
+        _options = options;
+    }
+
+    public void ProcessFile(string inputPath)
+    {
+        byte[] fileBytes = File.ReadAllBytes(inputPath);
+        if (!TextBlockInspector.IsText(fileBytes.AsSpan()) && fileBytes.Length > 0)
         {
-            string outputPath = GenerateOutputPath(inputPath);
-
-            using var loader = new FileLoader(inputPath);
-            context_ = loader.GetContext();
-            if (loader.GetLastException() != null)
-            {
-                throw context_.lastException!;
-            }
-            // 1. Проверка первого блока
-            var status = loader.NextBlock();
-            if (status == NextBlockError.Error)
-            {
-                if (loader.GetLastException() == null)
-                {
-                    context_.lastException = new Exception("Unknown error during file loading.");                   
-                }
-                throw context_.lastException!;
-            }
-                
-
-            if (!TextBlockInspector.IsText(loader.GetBufferSpan()))
-            {
-                context_.lastException = new InvalidOperationException($"Файл {inputPath} не является текстовым.");
-                throw context_.lastException;
-            }
-                
-
-            // 2. Основной цикл обработки
-            using (var writer = new StreamWriter(outputPath, false, Encoding.UTF8))
-            {
-                while (true)
-                {
-                    bool isLastBlock = (status == NextBlockError.EndBlock);
-                    ProcessBlock(loader.GetBufferSpan(), writer, isLastBlock);
-
-                    if (isLastBlock) break;
-
-                    status = loader.NextBlock();
-                    if (status == NextBlockError.Error)
-                        throw loader.GetLastException()!;
-                }
-            }
+            throw new InvalidOperationException($"Файл {inputPath} не является текстовым.");
         }
 
-        private void ProcessBlock(ReadOnlySpan<byte> buffer, StreamWriter writer, bool isLastBlock)
-        {
-            // Декодируем байты. Благодаря FileLoader, здесь всегда целые символы UTF-8
-            string text = Encoding.UTF8.GetString(buffer);
-            ReadOnlySpan<char> span = text.AsSpan();
+        string outputPath = GenerateOutputPath(inputPath);
+        string leftoverWord = string.Empty;
 
-            // Склеиваем с остатком слова из предыдущего блока (если он был)
-            if (!string.IsNullOrEmpty(_leftoverWord))
+        using var loader = new FileLoader(inputPath);
+        using var writer = new TextFileWriter(outputPath);
+
+        var processor = new TextCleanerCore(_options);
+
+        while (true)
+        {
+            var readResult = loader.ReadBlock();
+            if (readResult == ReadBlockResult.Error)
+                throw loader.GetLastException() ?? new Exception("Unknown error");
+
+            if (readResult == ReadBlockResult.EndOfFile)
             {
-                span = string.Concat(_leftoverWord, text).AsSpan();
-                _leftoverWord = string.Empty;
+                processor.FlushLeftover(leftoverWord, writer);
+                break;
             }
 
-            // Буфер для накопления очищенного текста перед записью в файл
-            var outputBatch = new StringBuilder(span.Length);
+            var buffer = loader.GetBufferSpan();
+            if (buffer.IsEmpty)
+                continue;
 
-            while (!span.IsEmpty)
+            var result = processor.ProcessBlock(buffer, writer, readResult == ReadBlockResult.EndOfFile, leftoverWord);
+            if (result.HasError)
+                throw result.Error!;
+
+            leftoverWord = result.LeftoverWord;
+        }
+    }
+
+    private static string GenerateOutputPath(string inputPath)
+    {
+        string dir = Path.GetDirectoryName(inputPath) ?? string.Empty;
+        string name = Path.GetFileNameWithoutExtension(inputPath);
+        string ext = Path.GetExtension(inputPath);
+        return Path.Combine(dir, $"{name}_cleaned{ext}");
+    }
+}
+
+internal class TextCleanerCore
+{
+    private readonly TextCleanerOptions _options;
+    private static readonly SearchValues<char> AllDelimiters =
+        SearchValues.Create(" \t\n\r.,!?;:-()\"'[]{}<>\\/|@#$%^&*+_=`~");
+    private static readonly SearchValues<char> PunctuationOnly =
+        SearchValues.Create(".,!?;:-()\"'[]{}<>\\/|@#$%^&*+_=`~");
+
+    private readonly StringBuilder _outputBuffer = new();
+
+    public TextCleanerCore(TextCleanerOptions options)
+    {
+        _options = options;
+    }
+
+    public TextProcessingResult ProcessBlock(
+        ReadOnlySpan<byte> buffer,
+        IFileWriter writer,
+        bool isLastBlock,
+        string leftoverWord)
+    {
+        string text = Encoding.UTF8.GetString(buffer);
+        var span = text.AsSpan();
+
+        if (!string.IsNullOrEmpty(leftoverWord))
+        {
+            span = string.Concat(leftoverWord, text).AsSpan();
+        }
+
+        while (!span.IsEmpty)
+        {
+            int index = span.IndexOfAny(AllDelimiters);
+
+            if (index == -1)
             {
-                // Находим индекс ЛЮБОГО разделителя (пробел, знак препинания, перенос строки)
-                int index = span.IndexOfAny(AllDelimiters);
-
-                if (index == -1)
+                if (isLastBlock)
                 {
-                    // Разделителей до конца блока нет
-                    if (isLastBlock)
-                    {
-                        AppendWordIfValid(outputBatch, span);
-                    }
-                    else
-                    {
-                        // Сохраняем "хвост" для склейки со следующим блоком
-                        _leftoverWord = span.ToString();
-                    }
-                    break;
-                }
-
-                // 1. Выделяем найденное слово (текст ДО разделителя)
-                ReadOnlySpan<char> word = span.Slice(0, index);
-                if (word.Length > 0)
-                {
-                    AppendWordIfValid(outputBatch, word);
-                }
-
-                // 2. Обрабатываем сам разделитель (символ ПО индексу)
-                char delimiter = span[index];
-
-                // Если это пунктуация (.,!?) — удаляем или оставляем по флагу
-                if (PunctuationOnly.Contains(delimiter))
-                {
-                    if (!_removePunctuation)
-                        outputBatch.Append(delimiter);
+                    AppendWordIfValid(_outputBuffer, span);
+                    writer.WriteLine(_outputBuffer.ToString());
                 }
                 else
                 {
-                    // Если это пробел, таб или \n — ВСЕГДА оставляем, чтобы сохранить структуру
-                    outputBatch.Append(delimiter);
+                    return TextProcessingResult.Success(span.ToString());
                 }
-
-                // 3. Отрезаем обработанную часть и продолжаем поиск в остатке
-                span = span.Slice(index + 1);
+                break;
             }
 
-            // Записываем весь обработанный блок в файл за один раз
-            writer.Write(outputBatch.ToString());
-        }
+            ReadOnlySpan<char> word = span.Slice(0, index);
+            AppendWordIfValid(_outputBuffer, word);
 
-
-        private void AppendWordIfValid(StringBuilder sb, ReadOnlySpan<char> word)
-        {
-            // Проверка: если удаление включено и слово слишком короткое — ничего не делаем
-            if (_removeShortWords && word.Length < _minWordLength)
+            char delimiter = span[index];
+            if (!PunctuationOnly.Contains(delimiter))
             {
-                return;
+                _outputBuffer.Append(delimiter);
+            }
+            else if (!_options.RemovePunctuation)
+            {
+                _outputBuffer.Append(delimiter);
             }
 
-            // Если слово проходит фильтр — добавляем его в буфер
-            sb.Append(word);
+            span = span.Slice(index + 1);
         }
 
-        private string GenerateOutputPath(string inputPath)
+        if (_outputBuffer.Length > 0)
         {
-            string dir = Path.GetDirectoryName(inputPath) ?? string.Empty;
-            string fileName = Path.GetFileNameWithoutExtension(inputPath);
-            string ext = Path.GetExtension(inputPath);
-            return Path.Combine(dir, $"{fileName}_cleaned{ext}");
+            writer.WriteLine(_outputBuffer.ToString());
+            _outputBuffer.Clear();
         }
+
+        return TextProcessingResult.Success();
+    }
+
+    public void FlushLeftover(string leftover, IFileWriter writer)
+    {
+        if (!string.IsNullOrEmpty(leftover))
+        {
+            _outputBuffer.Clear();
+            AppendWordIfValid(_outputBuffer, leftover.AsSpan());
+            if (_outputBuffer.Length > 0)
+            {
+                writer.WriteLine(_outputBuffer.ToString());
+            }
+        }
+    }
+
+    private void AppendWordIfValid(StringBuilder sb, ReadOnlySpan<char> word)
+    {
+        if (_options.RemoveShortWords && word.Length < _options.MinWordLength)
+            return;
+        sb.Append(word);
     }
 }
